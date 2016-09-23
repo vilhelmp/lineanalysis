@@ -499,7 +499,6 @@ def calc_line_flux(aul=None,
         return w.to(u.K * u.km/u.s), tau
 
 def calc_line_fluxes(linedata=None,
-                    model=None,
                     tex=None,
                     ntot=None,
                     species=None,
@@ -533,7 +532,7 @@ def calc_line_fluxes(linedata=None,
         qrot = get_partition_file(part_file_directory = part_file_directory, part_file=species.lower()+'.dat')
     else:
         raise Exception('no other qrot_method works atm')
-
+    model = linedata.copy()
     calc_fluxes = np.array([])
     calc_taus = np.array([])
     for i in range(len(linedata)):
