@@ -21,16 +21,16 @@ def cutout_lines(linedata=None,
                  spectrum=None,
                  ):
 
-"""
-    CUTOUT from plotting.py
-    vel_lims = linedata['vel'].quantity[num] + np.array([-2, 2]) * lwidth * u.km / u.s + vsys
-    velmin, velmax = vel_lims[0].value - linedata['vel'][num], vel_lims[1].value - linedata['vel'][num]
-    vel_mask = (spectra['vel'] > vel_lims[0]) * (spectra['vel'] < vel_lims[1])
-    # add this to function --- END
-    xvalues = spectra['vel'][vel_mask] - linedata['vel'][num]
-    yvalues = spectra[spos][vel_mask]
-"""
-
+    """
+        CUTOUT from plotting.py
+        vel_lims = linedata['vel'].quantity[num] + np.array([-2, 2]) * lwidth * u.km / u.s + vsys
+        velmin, velmax = vel_lims[0].value - linedata['vel'][num], vel_lims[1].value - linedata['vel'][num]
+        vel_mask = (spectra['vel'] > vel_lims[0]) * (spectra['vel'] < vel_lims[1])
+        # add this to function --- END
+        xvalues = spectra['vel'][vel_mask] - linedata['vel'][num]
+        yvalues = spectra[spos][vel_mask]
+    """
+    return None
 
 
 def fill_between_steps(x, y1, y2=0, h_align='mid', ax=None, **kwargs):

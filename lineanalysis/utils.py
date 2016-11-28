@@ -215,9 +215,10 @@ def calc_nlo_obs(nu=None,
                 aij=None,
                 w=None):
     #TODO this has not been fixed!
+    print('Function not checked!')
     nlo_obs = 8 * np.pi * c.k_B * nu**2 / (c.h * c.c**3 * aij)
     nlo_obs *= w
-    return nlo_ki.decompose().to(1/u.cm**2)
+    return nlo_obs.decompose().to(1/u.cm**2)
 
 
 
@@ -400,7 +401,9 @@ def integrate_all_lines(linedata=None,
                         ilims=None,
                         vsys=None,
                         fluxcol=None,
-                        dbg=False):
+                        dbg=False,
+                        verbose=True,
+                        ):
     '''
     Function to calculate integrated intensities of observations.
     :param linedata:
@@ -423,7 +426,8 @@ def integrate_all_lines(linedata=None,
                        dbg=False)
         obs_flux *= u.beam
         obs_fluxes = np.append(obs_fluxes,obs_flux.value)
-    print('Beam in unit multiplied away.')
+    if verbose:
+        print('Beam in unit multiplied away.')
     # preserve unit
     obs_fluxes = obs_fluxes * obs_flux.unit
     model['W_obs'] = obs_fluxes
@@ -454,6 +458,7 @@ def calc_line_flux(aul=None,
                    source=None,
                    usetau=True,
                    returnjy=True,
+                   verbose=True,
                    ):
     """
     Function to calculate the synthetic flux for one line.
@@ -506,9 +511,10 @@ def calc_line_fluxes(linedata=None,
                     beam=None,
                     source=None,
                     usetau=True,
-                    qrot_method='file',
                     part_file_directory = DEFAULT_PART_FILE_DIRECTORY,
                     returnjy=True,
+                    verbose=True,
+                    qrot_method='file',
                     ):
     '''
     Function to calculate synthetic line fluxes from Ntot and Tex.
@@ -530,6 +536,9 @@ def calc_line_fluxes(linedata=None,
     '''
     if qrot_method.lower()=='file':
         qrot = get_partition_file(part_file_directory = part_file_directory, part_file=species.lower()+'.dat')
+    elif qrot_method.lower()=='cdms':
+        import cdmspy
+        part_table, qrot = cdmspy.get_part_function(species, interp=True)
     else:
         raise Exception('no other qrot_method works atm')
     model = linedata.copy()
@@ -547,7 +556,9 @@ def calc_line_fluxes(linedata=None,
                        beam=beam,
                        source=source,
                        usetau=usetau,
-                       returnjy=returnjy)
+                       returnjy=returnjy,
+                       verbose=verbose,
+                       )
         calc_taus = np.append(calc_taus, tau_i)
         calc_fluxes = np.append(calc_fluxes, calc_flux.value)
     # preserve unit
@@ -568,6 +579,8 @@ def calc_line_fluxes(linedata=None,
 def check_for_blend(
         model=None,
         dnu=None,
+
+        verbose=True,
         ):
     """
 
@@ -575,7 +588,10 @@ def check_for_blend(
     :param dnu: max amount of GHz away for it to be a blend
     :return:
     """
-    print('Assumes sorted frequency in linedata input table.')
+    #TODO move over to velocity, since
+    # velocity is constant over frequency.
+    if verbose:
+        print('Assumes sorted frequency in linedata input table.')
 
     # empty list to store information about blend
     nlines = len(model['freq_rest'])
@@ -703,6 +719,7 @@ def calc_synthetic_spectrum(spectra=None,
                             modelname='model_flux_1',
                             fwhm=None,
                             fluxcol=None,
+                            verbose=True,
                             ):
     """
 
