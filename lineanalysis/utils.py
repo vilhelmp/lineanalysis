@@ -1,10 +1,12 @@
 
 import radio_beam
 import numpy as np
+import scipy as sp
+import scipy.stats
 import astropy.units as u
 import astropy.constants as c
 from astropy.table import Table, Column
-from scipy.optimize import curve_fit
+#from scipy.optimize import curve_fit
 import os
 import sys
 
@@ -22,8 +24,15 @@ i.e.
 W \propto Ntot * bd
 W \propto Nup * bd
 
-"""
 
+"""
+#TODO: Add calculations for:
+"""
+CDMS intensity
+# Aij = intens *freq**2 qrot(300K)/gup * (8pi/c**2)/(exp(-El/300K) - exp(-Eu/300K))
+# intens = Aij/freq**2 * (exp(-El/300K) - exp(-Eu/300K))*gup/qrot(300K) * c**2/(8pi)
+
+"""
 
 #################################################
 #           PARTITION FUNCTION PARSING          #
@@ -130,12 +139,14 @@ def beam_dilution(bmin,bmaj,smin,smaj):
 # Calculate Nu from Ntot and Tex
 @u.quantity_input(ntot=u.cm**-2, eu=u.Kelvin, tex=u.Kelvin)
 def calc_nup_tex(ntot=None, gup=None, qrot=None, eup=None, tex=None):
-    nup = ntot /  qrot * gup *  np.exp(-1*eup/tex)
+    #TODO does it accept arrays?
+    nup = ntot /  qrot * gup *  np.exp(-1*(eup/tex).decompose())
     return nup
 
 # Calculate tau from Nu and Tex
 @u.quantity_input(fwhm=u.km/u.s, nu=u.Hz , nup=u.cm**-2, aul=u.s**-1, eup=u.Kelvin, tex=u.Kelvin)
 def calc_tau(fwhm=None, nu=None , nup=None, aul=None, eup=None, tex=None):
+    #TODO does it accept arrays?
     tau = nup * aul * c.c**3 / (8 * np.pi * c.h * nu**3) * c.h/(fwhm)  * ( np.exp(c.h*nu/(c.k_B*tex))-1 )
     return tau
 
@@ -382,16 +393,18 @@ def integrate_line(linedata=None,
     '''
     xvalues = spectra['vel_obs'] - linedata['vel_vsys']
     xdiff = np.diff(xvalues)[0]
+    # width of a channel
     xwidth = abs(xdiff) * u.km/u.s
     if xdiff<0:
         ilims_bool = ((xvalues.quantity + xwidth/2.)>=ilims[0]) * ((xvalues.quantity - xwidth/2.)<=ilims[1])
     else:
         ilims_bool = ((xvalues.quantity - xwidth/2.)>=ilims[0]) * ((xvalues.quantity + xwidth/2.)<=ilims[1])
     yvalues = spectra[fluxcol]
+    nchans = len(ilims_bool.nonzero()[0])
     obs_flux = yvalues[ilims_bool].quantity.sum() * xwidth
     if dbg:
         return xvalues, yvalues, xwidth, ilims_bool, obs_flux
-    return obs_flux
+    return obs_flux, nchans
 
 
 @u.quantity_input(ilims=u.km/u.s, vsys=u.km/u.s)
@@ -416,14 +429,16 @@ def integrate_all_lines(linedata=None,
     '''
     # create emtpy arry to put the integrated line strengths in
     obs_fluxes = np.array([])
+    nchans = []
     # loop to integrate the line strength of each line
     for i in range(len(linedata)):
-        obs_flux = integrate_line(linedata=linedata[i:i+1],
+        obs_flux, nchan = integrate_line(linedata=linedata[i:i+1],
                        spectra=spectra,
                        ilims=ilims,
                        vsys=vsys,
                        fluxcol=fluxcol,
                        dbg=False)
+        nchans.append(nchan)
         obs_flux *= u.beam
         obs_fluxes = np.append(obs_fluxes,obs_flux.value)
     if verbose:
@@ -431,6 +446,14 @@ def integrate_all_lines(linedata=None,
     # preserve unit
     obs_fluxes = obs_fluxes * obs_flux.unit
     model['W_obs'] = obs_fluxes
+    # What is the error here?
+    # how many channels where added?
+    model.meta['nchans'] = nchans
+    try:
+        err = spectra.meta['RMS']*u.beam*np.sqrt(np.array(nchans, dtype='float'))
+        model['W_obs_err'] = err
+    except:
+        print('cannot estimate flux error. check spectra.meta[\'RMS\'] attribute.')
     return model
 
 
@@ -503,6 +526,152 @@ def calc_line_flux(aul=None,
     elif not returnjy:
         return w.to(u.K * u.km/u.s), tau
 
+
+def calc_line_flux_matrix(linedata=None,
+                    tex=None,
+                    ntot=None,
+                    species=None,
+                    fwhm=None,
+                    beam=None,
+                    source=None,
+                    ilims=None,
+                    usetau=True,
+                    part_file_directory = DEFAULT_PART_FILE_DIRECTORY,
+                    returnjy=True,
+                    verbose=True,
+                    qrot_method='file',
+                    qrot=None,
+                    ):
+    """
+    Calculates the line fluxes for each line
+    using matrix multiplication. This is significantly faster than
+    a for-loop.
+
+    :param linedata:
+    :param tex:
+    :param ntot:
+    :param species:
+    :param fwhm:
+    :param beam:
+    :param source:
+    :param ilims:
+    :param usetau:
+    :param part_file_directory:
+    :param returnjy:
+    :param verbose:
+    :param qrot_method:
+    :param qrot:
+    :return:
+    """
+    # Nup, column densit of upper level, to calculate tau.
+    nups = calc_nup_tex(ntot=ntot, gup=linedata['gup'].quantity, qrot=qrot(tex.value), eup=linedata['eup'].quantity, tex=tex)
+    # optical depth at line peak, tau
+    taus = calc_tau(fwhm=fwhm, nu=linedata['freq_rest'].quantity, nup=nups, aul=linedata['aij'].quantity, eup=linedata['eup'].quantity, tex=tex)
+    taus = taus.decompose().value
+    # calculate the beam dilution factor to be used
+    bd = beam_dilution(bmin=beam[0], bmaj=beam[1], smin=source[0], smaj=source[1])
+    # the optical depth effect on the intensity
+    c_taus = taus / (1 - np.exp(-taus))
+    # calculate synthetic flux, based on Ntot and Tex input.
+    # gives K km/s as output
+    ws = nups * c.h * c.c ** 3 * linedata['aij'].quantity / (8. * np.pi * c.k_B * linedata['freq_rest'].quantity ** 2)
+    # beam dilution
+    ws *= bd
+    # if we are applying the optical depth factor
+    # do it below
+    if usetau:
+        ws /= c_taus
+    if returnjy:
+        beamobj = radio_beam.Beam(beam[0] * u.arcsec, beam[1] * u.arcsec, beam[2] * u.deg)
+        ws = (ws * u.s / u.km).to(u.Jy, beamobj.jtok_equiv(linedata['freq_rest'].quantity))
+        return ws * u.km / u.s, taus
+    # now we want to return the correct unit
+    # tau is unitless, we made sure to decompose it above
+    elif not returnjy:
+        return ws.to(u.K * u.km / u.s), taus
+    #return None
+
+def calc_synthetic_spectrum_matrix(model=None,
+                            fwhm=None,
+                            verbose=True,
+                            freqs=None,
+                            ):
+    # freq shoul be able to be array
+    #fwhm_vel = np.ones_like(spectra['freq']) * fwhm
+    sigma = fwhm / (2 * (2 * np.log(2)) ** .5)
+    # just doppler relation
+    # the observed frequencies
+    fwhm_freq = (fwhm / c.c * model['freq_rest']).decompose().to(u.GHz)
+    sigma_freq = fwhm_freq / (2 * (2 * np.log(2)) ** .5)
+
+    model['sigma_freq'] = sigma_freq
+    model['fwhm_freq'] = fwhm_freq
+    gauss = lambda x, pos, amp, sigma: amp * np.exp(-(x - pos) ** 2 / (2 * sigma ** 2))
+
+    # TODO: this doesn't handle blended lines
+    amps = model['W_calc'].quantity / (sigma * (2 * np.pi) ** .5)
+    # spectra = gauss(freqs, model['freq_rest'].quantity.T, amplitude.T, sigmac_freq.T)
+    # Gaussian function
+    spectra = np.array(
+        [gauss(freqs, i, a, s) for i, a, s in zip(model['freq_rest'].quantity,
+                                                  amps,
+                                                  sigma_freq)])
+    return spectra.sum(axis=0)*amps.unit
+    """
+    # from the model table, BUT from the sigma_freq array
+    n = 0
+    while n<len(model):
+        #for line,sigma_freq in zip(model,sigma_freq):
+        pos = model['freq_rest'].quantity[n]
+        if model['blend'][n]:
+            # since W_calc is in Jy km/s
+            # need to divide by fwhm in km/s to get Jy
+            amplitude = model['W_calc_blend'].quantity[n] / (sigma * (2 * np.pi)**.5 )
+            # add the gaussian to the spectra
+            syn_spectra += gauss(freqs, model['freq_rest'].quantity[n].value, amplitude, sigma_freq[n].value)
+            n += np.max(model['blend'][n])
+        elif not model['blend'][n]:
+            # since W_calc is in Jy km/s
+            # need to divide by fwhm in km/s to get Jy
+            amplitude = model['W_calc'].quantity[n] / (sigma * (2 * np.pi)**.5 )
+            # add the gaussian to the spectra
+            syn_spectra += gauss(freqs, model['freq_rest'].quantity[n].value, amplitude, sigma_freq[n].value)
+            n += 1
+        else:
+            raise(Exception('Could not run while loop.'))
+        if model['blend'].any():
+            spectra.meta['synthetic_spectra_info'] = 'Blends are summed and accounted for.'
+
+    # Now calculate this for a region around each line
+    line_freqs_array = []
+    model_spectra_blend = []
+    model_spectra_single = []
+    spectra_obs_lsr = []
+    n = 0
+    while n < len(model):
+        # create array of arrays, with frequencies for
+        # # calculating Gaussians
+        f_start = (freqs >= (model['freq_rest'].quantity[n] - 4*fwhm_freq[n])).nonzero()[0][0]
+        f_stop = (freqs <= (model['freq_rest'].quantity[n] + 4*fwhm_freq[n])).nonzero()[0][-1]
+        # get the blended spectrum for line
+        model_spectra_blend.append( syn_spectra[f_start:f_stop] )
+        try:
+            spectra_obs_lsr.append( spectra[fluxcol].quantity[f_start:f_stop] )
+        line_freqs_array.append( freqs[f_start:f_stop] )
+        amplitude = model['W_calc'].quantity[n] / (sigma * (2 * np.pi) ** .5)
+        syn_line = gauss(freqs[f_start:f_stop].value, model['freq_rest'].quantity[n].value, amplitude, sigma_freq[n].value)
+        model_spectra_single.append( syn_line )
+        n += 1
+    # create astropy table to put into large model table
+    # with spectra around each line.
+    syn_lines_table = Table(data=[line_freqs_array, model_spectra_single, model_spectra_blend, spectra_obs_lsr],
+                            names=['freq_rest', 'spectra_single', 'spectra_blend', 'spectra_obs_lsr'])
+    spectra[modelname] = syn_spectra
+    #model[modelname] = syn_lines_table
+
+    return spectra, syn_lines_table
+    """
+
 def calc_line_fluxes(linedata=None,
                     tex=None,
                     ntot=None,
@@ -510,11 +679,13 @@ def calc_line_fluxes(linedata=None,
                     fwhm=None,
                     beam=None,
                     source=None,
+                    ilims=None,
                     usetau=True,
                     part_file_directory = DEFAULT_PART_FILE_DIRECTORY,
                     returnjy=True,
                     verbose=True,
                     qrot_method='file',
+                    qrot=None,
                     ):
     '''
     Function to calculate synthetic line fluxes from Ntot and Tex.
@@ -534,18 +705,35 @@ def calc_line_fluxes(linedata=None,
     :param part_file_directory:
     :return:
     '''
+    sigma = fwhm / (2 * (2 * np.log(2)) ** .5)
+    # just doppler relation
+    # the observed frequencies
+    #fwhm_freq = (fwhm/c.c * linedata['freq_rest']).decompose().to(u.GHz)
+    # the observed frequencies
+    #sigma_freq = fwhm_freq / (2 * (2 * np.log(2)) ** .5)
+
     if qrot_method.lower()=='file':
         qrot = get_partition_file(part_file_directory = part_file_directory, part_file=species.lower()+'.dat')
     elif qrot_method.lower()=='cdms':
         import cdmspy
         part_table, qrot = cdmspy.get_part_function(species, interp=True)
+    #elif type(qrot_method) == type(lambda x:x**2): # if it's already a function
+    #elif type(qrot_method) == spl:
+    elif qrot_method=='func':
+        try:
+            linedata.meta['part_function'](100.)
+        except:
+            print('Partion function input is not a Python function. Expected function.')
+        qrot = linedata.meta['part_function']
     else:
         raise Exception('no other qrot_method works atm')
     model = linedata.copy()
     calc_fluxes = np.array([])
+    calc_ilimfluxes = np.array([])
+    calc_ilimfraction = np.array([])
     calc_taus = np.array([])
     for i in range(len(linedata)):
-        calc_flux, tau_i = calc_line_flux(aul=10**linedata['aij'][i]*u.s**-1,
+        calc_flux, tau_i = calc_line_flux(aul=10**linedata['log10_aij'][i]*u.s**-1,
                        nu=linedata['freq_rest'].quantity[i],
                        ntot=ntot,
                        qrot=qrot,
@@ -559,13 +747,26 @@ def calc_line_fluxes(linedata=None,
                        returnjy=returnjy,
                        verbose=verbose,
                        )
+        # calculate what the normalized fraction of flux it should be
+        if ilims==[None,None]:
+            fraction = 1
+        else:
+            normdist = sp.stats.norm(0, sigma.value)
+            fraction = normdist.cdf(ilims[1].value) - normdist.cdf(ilims[0].value)
+        # with this fraction we can calculate the flux
+        # within ilims limits
         calc_taus = np.append(calc_taus, tau_i)
         calc_fluxes = np.append(calc_fluxes, calc_flux.value)
+        calc_ilimfraction = np.append(calc_ilimfraction, fraction)
     # preserve unit
     calc_fluxes = calc_fluxes * calc_flux.unit
     # now add the fluxese to a column.
     model['W_calc'] = calc_fluxes
+    # calculate the fluxes within ilims
+    if verbose:print('Tau is already applied, calculating fractional flux from tau-corrected fluxes.')
+    model['W_calc_ilims'] = model['W_calc'] * calc_ilimfraction
     model['tau_calc'] = calc_taus
+    model['ilimfraction'] = calc_ilimfraction
     model.meta['W_calc_comment'] = ['Only one beam for whole data set']
     model.meta['W_calc_beamdilution_applied'] = True
     model.meta['W_calc_info'] = dict(beam=beam, source=source)
@@ -575,11 +776,10 @@ def calc_line_fluxes(linedata=None,
     return model
 
 # function to check table for line blends
-@u.quantity_input(dnu=u.Hz)
+#@u.quantity_input(dnu=u.Hz)
 def check_for_blend(
         model=None,
         dnu=None,
-
         verbose=True,
         ):
     """
@@ -588,31 +788,43 @@ def check_for_blend(
     :param dnu: max amount of GHz away for it to be a blend
     :return:
     """
-    #TODO move over to velocity, since
-    # velocity is constant over frequency.
+    #TODO: move over to velocity (?)
     if verbose:
         print('Assumes sorted frequency in linedata input table.')
-
     # empty list to store information about blend
     nlines = len(model['freq_rest'])
     emarr = [[] for i in range(nlines)]
-
     for i in range(nlines):
         try:
             # check one in front
             diffnu1 = model['freq_rest'].quantity[i + 1] - model['freq_rest'].quantity[i]
-            if diffnu1 <= dnu:  # BLEND!
-                emarr[i].append(+1)
+        except(IndexError):  # if we try to jump beyond the list
+            diffnu1 = 3*dnu
+        try:
             # check two in front
             diffnu2 = model['freq_rest'].quantity[i + 2] - model['freq_rest'].quantity[i]
+        except(IndexError):  # if we try to jump beyond the list
+            diffnu2 = 3*dnu
+        if diffnu1 <= dnu:  # BLEND one in front
+            emarr[i].append(1)
             if diffnu2 <= (dnu * 1.5):  # BLEND!
-                emarr[i].append(+2)
-        except(IndexError):
-            break
+                emarr[i].append(2)
+        else: # if the first is not a blend, the second is not either
+            emarr[i].append(None)
+    # if any lines blended, we add the list
     model['blend'] = emarr
     model.meta['blend_info'] = 'Assumes table is sorted in frequency.'
     model.meta['blend_info'] = 'blend shown by list, if [1] then line is blended with the 1 infront \
-if [1,2] then blended with both 1 and 2 in front.'
+    if [1,2] then blended with both 1 and 2 in front.'
+    # got error here before.
+    # changed from
+    # model['blend'].any()
+    # to
+    # np.array((model['blend'].tolist()),dtype='bool').any()
+    if np.array((model['blend'].tolist()),dtype='bool').any():
+        model.meta['blends_present'] = True
+    elif not np.array((model['blend'].tolist()),dtype='bool').any(): # if not, there's no use
+        model.meta['blends_present'] = False
     return model
 
 # function to process the blend information of the model table
@@ -621,21 +833,22 @@ def process_model_blends(model=None,
     """
     :param model:
     :param action:
-    :return:
+    :return:freq_rest	filled
     """
     # need to figure out how to calculate the blended fluxes
     model['W_calc_blend'] = [np.nan for i in model['W_calc']]
     model['W_calc_blend'].unit = model['W_calc'].unit
     model['tau_calc_blend'] = [np.nan for i in model['W_calc']]
     for i in range(len(model)):
-        if model['blend'][i]: # if its a blend!
+        if model['blend'][i].tolist() != [None]: # if its a blend!
+            #print('Its a blend {0}'.format(i))
             # +1 because slicing rules of Python
             # this assumes that if 2 away is blended
             # # 1 away is too, i.e. again, that the table is sorted after frequency
             #-----
             # if tau was applied, we need to first un-apply it to
             # be able to sum the flux and then apply the summed tau value to the blended flux.
-            tau_blends = model['tau_calc'][i:i + np.max(model['blend'][i]) + 1]
+            tau_blends = model['tau_calc'][i:i + np.max(model['blend'][i].filled()) + 1]
             tau_blends_sum = tau_blends.sum()
             model['tau_calc_blend'][i] = tau_blends_sum
             # if Tau was applied to original fluxes
@@ -644,9 +857,11 @@ def process_model_blends(model=None,
                 c_tau_blends_sum = tau_blends_sum/(1 - np.exp(-tau_blends_sum))
                 # first un-apply tau to the individual flux calcs
                 c_tau_blends = tau_blends / (1 - np.exp(-tau_blends))
-                W_calcs = model['W_calc'][i:i + np.max(model['blend'][i]) + 1].quantity
+                # full line
+                W_calcs = model['W_calc'][i:i + np.max(model['blend'][i].filled()) + 1].quantity
                 W_calcs_notau_sum = (W_calcs*c_tau_blends).sum()
                 W_sum = W_calcs_notau_sum/c_tau_blends_sum
+                # flux within ilims
                 model['W_calc_blend'][i] = W_sum.to(model['W_calc_blend'].unit).value
                 model['tau_calc_blend'][i] = tau_blends_sum
                 tau_applied = True
@@ -654,9 +869,13 @@ def process_model_blends(model=None,
             # do not do it here either.
             elif not model.meta['W_calc_tau_applied']:
                 tau_applied = False
-                W_sum = model['W_calc'][i:i + np.max(model['blend'][i]) + 1].quantity.sum()
+                W_sum = model['W_calc'][i:i + np.max(model['blend'][i].filled()) + 1].quantity.sum()
                 model['W_calc_blend'][i] = W_sum.to(model['W_calc_blend'].unit).value
                 tau_applied = False
+        else:
+            tau_applied = model.meta['W_calc_tau_applied']
+
+    model['W_calc_ilims_blend'] = model['W_calc_blend'] * model['ilimfraction']
     if tau_applied:
         model.meta['W_calc_blend_tau_applied_info'] = 'Tau re-applied to model blend W sum.'
         model.meta['W_calc_blend_tau_applied'] = tau_applied
@@ -696,11 +915,11 @@ def calc_line_fluxes_grid(linedata=None,
             for n in ntots:
                 calc_flux,tau_i = calc_line_flux(aul=10**linedata[i]['aij'],
                        nu=linedata[i].quantity['freq_rest'],
-                       ntot=ntot,
+                       ntot=n,
                        qrot=qrot,
                        gup=linedata[i]['gup'],
                        eup=linedata[i].quantity['eup'],
-                       tex=tex,
+                       tex=n,
                        fwhm=fwhm,
                        beam=beam,
                        source=source,
@@ -720,6 +939,7 @@ def calc_synthetic_spectrum(spectra=None,
                             fwhm=None,
                             fluxcol=None,
                             verbose=True,
+                            freqs=None,
                             ):
     """
 
@@ -735,8 +955,6 @@ def calc_synthetic_spectrum(spectra=None,
      and without blends summed.
 
     """
-    #TODO account for blends and calculate blended spectrum
-    #TODO calculate spectrum for each line
     # freq shoul be able to be array
     #fwhm_vel = np.ones_like(spectra['freq']) * fwhm
     sigma = fwhm / (2 * (2 * np.log(2)) ** .5)
@@ -744,32 +962,38 @@ def calc_synthetic_spectrum(spectra=None,
     # the observed frequencies
     fwhm_freq = (fwhm/c.c * model['freq_rest']).decompose().to(u.GHz)
     # the observed frequencies
-    freqs = spectra['freq_lsr']
-    sigmas_freq = fwhm_freq / (2 * (2 * np.log(2)) ** .5)
+    if spectra==None:
+        freqs = freqs
+    else:
+        freqs = spectra['freq_lsr']
+    sigma_freq = fwhm_freq / (2 * (2 * np.log(2)) ** .5)
+
+    model['sigma_freq'] = sigma_freq
+    model['fwhm_freq'] = fwhm_freq
 
     gauss = lambda x, pos, amplitude, sigma: amplitude * np.exp(-(x-pos)**2/(2 * sigma**2))
 
-    syn_spectra = np.zeros_like(spectra['freq_lsr'])
+    syn_spectra = np.zeros_like(freqs)
 
     #TODO does it preserve the units(?)
-    # from the model table, BUT from the sigmas_freq array
+    # from the model table, BUT from the sigma_freq array
     n = 0
     while n<len(model):
-        #for line,sigma_freq in zip(model,sigmas_freq):
+        #for line,sigma_freq in zip(model,sigma_freq):
         pos = model['freq_rest'].quantity[n]
         if model['blend'][n]:
             # since W_calc is in Jy km/s
             # need to divide by fwhm in km/s to get Jy
             amplitude = model['W_calc_blend'].quantity[n] / (sigma * (2 * np.pi)**.5 )
             # add the gaussian to the spectra
-            syn_spectra += gauss(freqs, model['freq_rest'].quantity[n].value, amplitude, sigmas_freq[n].value)
+            syn_spectra += gauss(freqs, model['freq_rest'].quantity[n].value, amplitude, sigma_freq[n].value)
             n += np.max(model['blend'][n])
         elif not model['blend'][n]:
             # since W_calc is in Jy km/s
             # need to divide by fwhm in km/s to get Jy
             amplitude = model['W_calc'].quantity[n] / (sigma * (2 * np.pi)**.5 )
             # add the gaussian to the spectra
-            syn_spectra += gauss(freqs, model['freq_rest'].quantity[n].value, amplitude, sigmas_freq[n].value)
+            syn_spectra += gauss(freqs, model['freq_rest'].quantity[n].value, amplitude, sigma_freq[n].value)
             n += 1
         else:
             raise(Exception('Could not run while loop.'))
@@ -785,14 +1009,17 @@ def calc_synthetic_spectrum(spectra=None,
     while n < len(model):
         # create array of arrays, with frequencies for
         # # calculating Gaussians
-        f_start = (spectra['freq_lsr'] >= (model['freq_rest'].quantity[n] - 4*fwhm_freq[n])).nonzero()[0][0]
-        f_stop = (spectra['freq_lsr'] <= (model['freq_rest'].quantity[n] + 4*fwhm_freq[n])).nonzero()[0][-1]
+        f_start = (freqs >= (model['freq_rest'].quantity[n] - 4*fwhm_freq[n])).nonzero()[0][0]
+        f_stop = (freqs <= (model['freq_rest'].quantity[n] + 4*fwhm_freq[n])).nonzero()[0][-1]
         # get the blended spectrum for line
         model_spectra_blend.append( syn_spectra[f_start:f_stop] )
         spectra_obs_lsr.append( spectra[fluxcol].quantity[f_start:f_stop] )
-        line_freqs_array.append( spectra['freq_lsr'].quantity[f_start:f_stop] )
+        line_freqs_array.append( freqs[f_start:f_stop] )
         amplitude = model['W_calc'].quantity[n] / (sigma * (2 * np.pi) ** .5)
-        syn_line = gauss(spectra['freq_lsr'].quantity[f_start:f_stop].value, model['freq_rest'].quantity[n].value, amplitude, sigmas_freq[n].value)
+        syn_line = gauss(freqs[f_start:f_stop].quantity.value,
+                         model['freq_rest'].quantity[n].value,
+                         amplitude,
+                         sigma_freq[n].value)
         model_spectra_single.append( syn_line )
         n += 1
     # create astropy table to put into large model table

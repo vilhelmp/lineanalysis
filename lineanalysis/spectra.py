@@ -22,7 +22,7 @@ def cutout_lines(linedata=None,
                  ):
 
     """
-        CUTOUT from plotting.py
+    CUTOUT from plotting.py
         vel_lims = linedata['vel'].quantity[num] + np.array([-2, 2]) * lwidth * u.km / u.s + vsys
         velmin, velmax = vel_lims[0].value - linedata['vel'][num], vel_lims[1].value - linedata['vel'][num]
         vel_mask = (spectra['vel'] > vel_lims[0]) * (spectra['vel'] < vel_lims[1])
