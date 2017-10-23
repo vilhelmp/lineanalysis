@@ -821,15 +821,16 @@ def check_for_blend(
     # model['blend'].any()
     # to
     # np.array((model['blend'].tolist()),dtype='bool').any()
-    if np.array((model['blend'].tolist()),dtype='bool').any():
+    if np.array(model['blend'],dtype='bool').any():
         model.meta['blends_present'] = True
-    elif not np.array((model['blend'].tolist()),dtype='bool').any(): # if not, there's no use
+    elif not np.array(model['blend'],dtype='bool').any(): # if not, there's no use
         model.meta['blends_present'] = False
     return model
 
 # function to process the blend information of the model table
 def process_model_blends(model=None,
-                         action='add'):
+                         action='add',
+                         verbose=False):
     """
     :param model:
     :param action:
@@ -840,7 +841,10 @@ def process_model_blends(model=None,
     model['W_calc_blend'].unit = model['W_calc'].unit
     model['tau_calc_blend'] = [np.nan for i in model['W_calc']]
     for i in range(len(model)):
-        if model['blend'][i].tolist() != [None]: # if its a blend!
+        if model['blend'][i] != [None]: # if its a blend!
+            if verbose:
+                print('Blend: ', model['blend'][i])
+                print(i)
             #print('Its a blend {0}'.format(i))
             # +1 because slicing rules of Python
             # this assumes that if 2 away is blended
@@ -848,7 +852,11 @@ def process_model_blends(model=None,
             #-----
             # if tau was applied, we need to first un-apply it to
             # be able to sum the flux and then apply the summed tau value to the blended flux.
-            tau_blends = model['tau_calc'][i:i + np.max(model['blend'][i].filled()) + 1]
+            #tau_blends = model['tau_calc'][i:i + np.max(model['blend'][i].filled()) + 1]
+            if model.masked:
+                tau_blends = model['tau_calc'][i:i + np.max(model['blend'][i].filled()) + 1]
+            else:
+                tau_blends = model['tau_calc'][i:i + np.max(model['blend'][i]) + 1]
             tau_blends_sum = tau_blends.sum()
             model['tau_calc_blend'][i] = tau_blends_sum
             # if Tau was applied to original fluxes
@@ -858,7 +866,10 @@ def process_model_blends(model=None,
                 # first un-apply tau to the individual flux calcs
                 c_tau_blends = tau_blends / (1 - np.exp(-tau_blends))
                 # full line
-                W_calcs = model['W_calc'][i:i + np.max(model['blend'][i].filled()) + 1].quantity
+                if model.masked:
+                    W_calcs = model['W_calc'][i:i + np.max(model['blend'][i].filled()) + 1].quantity
+                else:
+                    W_calcs = model['W_calc'][i:i + np.max(model['blend'][i]) + 1].quantity
                 W_calcs_notau_sum = (W_calcs*c_tau_blends).sum()
                 W_sum = W_calcs_notau_sum/c_tau_blends_sum
                 # flux within ilims
@@ -869,7 +880,10 @@ def process_model_blends(model=None,
             # do not do it here either.
             elif not model.meta['W_calc_tau_applied']:
                 tau_applied = False
-                W_sum = model['W_calc'][i:i + np.max(model['blend'][i].filled()) + 1].quantity.sum()
+                if model.masked:
+                    W_sum = model['W_calc'][i:i + np.max(model['blend'][i].filled()) + 1].quantity.sum()
+                else:
+                    W_sum = model['W_calc'][i:i + np.max(model['blend'][i]) + 1].quantity.sum()
                 model['W_calc_blend'][i] = W_sum.to(model['W_calc_blend'].unit).value
                 tau_applied = False
         else:
